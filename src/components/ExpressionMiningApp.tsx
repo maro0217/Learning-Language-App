@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import { ArrowLeft, CheckCircle2, Sparkles } from 'lucide-react';
 import { Expression, HistoryEntry } from '@/lib/types';
-import { PracticeScenario } from '@/lib/practiceLogic';
+import { TranslationExercise } from '@/lib/practiceLogic';
 import { seedExpressions } from '@/lib/seedData';
 import {
   getExpressionsLocal,
@@ -21,23 +21,22 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import DarkToggle from './ui/DarkToggle';
 
-type Screen = 'home' | 'practice' | 'history';
-type HomeTab = 'library' | 'insights';
+type Screen = 'expressions' | 'practice' | 'history';
 
 export default function ExpressionMiningApp() {
-  const [screen, setScreen] = useState<Screen>('home');
-  const [homeTab, setHomeTab] = useState<HomeTab>('library');
+  const [screen, setScreen] = useState<Screen>('expressions');
   const [expressions, setExpressions] = useState<Expression[]>([]);
   const [newExpr, setNewExpr] = useState('');
   const [history, setHistory] = useState<HistoryEntry[]>([]);
 
-  const [scenario, setScenario] = useState<PracticeScenario | null>(null);
-  const [userReply, setUserReply] = useState('');
-  const [lastResult, setLastResult] = useState<Record<string, boolean>>({});
+  const [exercise, setExercise] = useState<TranslationExercise | null>(null);
+  const [answer, setAnswer] = useState('');
+  const [evaluationResults, setEvaluationResults] = useState<Record<string, boolean>>({});
+  const [evaluationFeedback, setEvaluationFeedback] = useState('');
+  const [correctedAnswer, setCorrectedAnswer] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [practiceError, setPracticeError] = useState('');
 
@@ -64,60 +63,99 @@ export default function ExpressionMiningApp() {
     setExpressions(getExpressionsLocal());
   }
 
+  function resetPracticeState() {
+    setExercise(null);
+    setAnswer('');
+    setEvaluationResults({});
+    setEvaluationFeedback('');
+    setCorrectedAnswer('');
+    setPracticeError('');
+  }
+
   async function startPractice() {
-    const selected = expressions.filter((e) => e.selected);
-    if (!selected.length) {
-      setPracticeError('Select at least one expression to practice.');
+    const selected = expressions.filter((e) => e.selected).map((e) => e.text);
+    const targets = selected.length ? selected : expressions.map((e) => e.text);
+
+    if (!expressions.length) {
+      setPracticeError('Add at least one expression before you start practice.');
       return;
     }
+
     setPracticeError('');
     setIsLoading(true);
     try {
       const res = await fetch('/api/practice', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'generate', expressions: selected.map((s) => s.text) })
+        body: JSON.stringify({ action: 'generate_translation', expressions: targets })
       });
-      const data = await res.json() as { ok?: boolean; scenario?: PracticeScenario };
-      if (data.ok && data.scenario) {
-        setScenario(data.scenario);
-        setUserReply('');
-        setLastResult({});
+      const data = await res.json() as {
+        ok?: boolean;
+        exercise?: TranslationExercise;
+      };
+
+      if (data.ok && data.exercise) {
+        setExercise(data.exercise);
+        setAnswer('');
+        setEvaluationResults({});
+        setEvaluationFeedback('');
+        setCorrectedAnswer('');
         setScreen('practice');
+      } else {
+        setPracticeError('Could not generate a translation exercise right now.');
       }
     } catch (err) {
       console.error(err);
-      setPracticeError('Unable to create conversation scenario.');
+      setPracticeError('Unable to create the translation exercise.');
     } finally {
       setIsLoading(false);
     }
   }
 
-  async function evaluateReply() {
-    if (!scenario) return;
-    const selected = expressions.filter((e) => e.selected);
-    if (!userReply.trim()) {
-      setPracticeError('Please type a reply before submitting.');
+  async function submitAnswer() {
+    if (!exercise) return;
+    if (!answer.trim()) {
+      setPracticeError('Please enter your answer before submitting.');
       return;
     }
+
+    const selected = expressions.filter((e) => e.selected).map((e) => e.text);
+    const targets = selected.length ? selected : expressions.map((e) => e.text);
+    const textToIds = Object.fromEntries(expressions.map((expr) => [expr.text, expr.id]));
+
     setPracticeError('');
     setIsLoading(true);
     try {
       const res = await fetch('/api/practice', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'evaluate', expressions: selected.map((s) => s.text), reply: userReply })
+        body: JSON.stringify({
+          action: 'evaluate_translation',
+          expressions: targets,
+          userAnswer: answer,
+          japanesePrompt: exercise.japanesePrompt,
+          modelAnswer: exercise.modelAnswer
+        })
       });
-      const data = await res.json() as { ok?: boolean; results?: Record<string, boolean> };
+      const data = await res.json() as {
+        ok?: boolean;
+        results?: Record<string, boolean>;
+        feedback?: string;
+        correctedAnswer?: string;
+      };
+
       if (data.ok && data.results) {
-        setLastResult(data.results);
+        setEvaluationResults(data.results);
+        setEvaluationFeedback(data.feedback || 'Review the results below.');
+        setCorrectedAnswer(data.correctedAnswer || '');
+
         const now = new Date().toISOString();
         const successes: HistoryEntry[] = [];
-        for (const e of selected) {
-          const ok = data.results[e.text];
+        for (const [exprText, ok] of Object.entries(data.results)) {
           if (ok) {
-            incrementUsageCountLocal(e.id);
-            successes.push({ expression: e.text, usedAt: now });
+            const id = textToIds[exprText];
+            if (id) incrementUsageCountLocal(id);
+            successes.push({ expression: exprText, usedAt: now });
           }
         }
         if (successes.length) {
@@ -125,98 +163,99 @@ export default function ExpressionMiningApp() {
           saveHistoryLocal([...successes, ...current]);
         }
         load();
+      } else {
+        setPracticeError('Could not evaluate your answer.');
       }
     } catch (err) {
       console.error(err);
-      setPracticeError('Unable to evaluate your reply right now.');
+      setPracticeError('Unable to evaluate your answer right now.');
     } finally {
       setIsLoading(false);
     }
   }
 
-  function exitPractice() {
-    setScenario(null);
-    setUserReply('');
-    setLastResult({});
-    setPracticeError('');
-    setScreen('home');
+  function goToScreen(target: Screen) {
+    setScreen(target);
+    if (target === 'expressions') {
+      resetPracticeState();
+    }
   }
 
   const selectedCount = expressions.filter((e) => e.selected).length;
   const totalUses = expressions.reduce((sum, expr) => sum + (expr.count || 0), 0);
-  const readinessPercent = expressions.length ? Math.round((selectedCount / expressions.length) * 100) : 0;
-  const hasResults = Object.keys(lastResult).length > 0;
-  const successCount = Object.values(lastResult).filter(Boolean).length;
-  const totalCount = Object.keys(lastResult).length;
+  const activeTargets = expressions.filter((e) => e.selected).map((e) => e.text);
 
-  if (screen === 'home') {
-    return (
-      <div className="min-h-screen px-4 py-5 sm:px-6">
-        <div className="mx-auto flex max-w-xl flex-col gap-5 pb-28">
-          <Card>
-            <CardHeader className="items-start justify-between gap-4 sm:flex-row">
-              <div>
-                <CardTitle>Expression Mining</CardTitle>
-                <CardDescription>Practice targeted English phrases with AI-powered conversation prompts.</CardDescription>
-              </div>
-              <DarkToggle />
-            </CardHeader>
-            <CardContent className="grid gap-3 sm:grid-cols-3">
-              <div className="rounded-3xl border border-input bg-muted p-4 text-center">
-                <p className="text-xs font-medium text-muted-foreground uppercase tracking-[0.24em]">Expressions</p>
-                <p className="mt-3 text-3xl font-semibold text-foreground">{expressions.length}</p>
-              </div>
-              <div className="rounded-3xl border border-input bg-muted p-4 text-center">
-                <p className="text-xs font-medium text-muted-foreground uppercase tracking-[0.24em]">Selected</p>
-                <p className="mt-3 text-3xl font-semibold text-foreground">{selectedCount}</p>
-              </div>
-              <div className="rounded-3xl border border-input bg-muted p-4 text-center">
-                <p className="text-xs font-medium text-muted-foreground uppercase tracking-[0.24em]">Uses</p>
-                <p className="mt-3 text-3xl font-semibold text-foreground">{totalUses}</p>
-              </div>
-            </CardContent>
-          </Card>
+  const sortedHistory = [...history].sort((a, b) => (a.usedAt < b.usedAt ? 1 : -1));
+  const topExpressions = [...expressions]
+    .sort((a, b) => (b.count || 0) - (a.count || 0))
+    .slice(0, 5);
 
-          <Card>
-            <CardHeader className="items-center justify-between gap-4">
-              <div>
-                <CardTitle>Add a new expression</CardTitle>
-                <CardDescription>Save natural phrase candidates and keep your practice goal-focused.</CardDescription>
-              </div>
-              <Sparkles className="h-5 w-5 text-primary" />
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
-                <Input
-                  value={newExpr}
-                  onChange={(event) => setNewExpr(event.target.value)}
-                  onKeyPress={(event) => event.key === 'Enter' && addExpression()}
-                  placeholder="e.g., break the ice"
-                />
-                <Button onClick={addExpression} disabled={!newExpr.trim()}>
-                  Add
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
+  return (
+    <div className="min-h-screen px-4 py-5 sm:px-6">
+      <div className="mx-auto flex max-w-xl flex-col gap-5 pb-24">
+        <div className="flex flex-col gap-4 rounded-3xl border border-input bg-muted p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-[0.24em] text-muted-foreground">Expression Mining</p>
+            <h1 className="mt-2 text-2xl font-semibold text-foreground">Learn with expression-focused translation drills</h1>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant={screen === 'expressions' ? 'secondary' : 'ghost'} size="sm" onClick={() => goToScreen('expressions')}>
+              Expressions
+            </Button>
+            <Button variant={screen === 'practice' ? 'secondary' : 'ghost'} size="sm" onClick={() => goToScreen('practice')}>
+              Practice
+            </Button>
+            <Button variant={screen === 'history' ? 'secondary' : 'ghost'} size="sm" onClick={() => goToScreen('history')}>
+              History
+            </Button>
+            <DarkToggle />
+          </div>
+        </div>
 
-          <Card>
-            <CardHeader className="items-center justify-between gap-4">
-              <div>
-                <CardTitle>Expression library</CardTitle>
-                <CardDescription>Tap a phrase to queue it for your next practice scenario.</CardDescription>
-              </div>
-              <Badge variant="secondary">{expressions.length} total</Badge>
-            </CardHeader>
-            <CardContent className="space-y-4">
-<Tabs value={homeTab} onValueChange={(value) => setHomeTab(value as HomeTab)}>                <TabsList>
-                  <TabsTrigger value="library">Library</TabsTrigger>
-                  <TabsTrigger value="insights">Insights</TabsTrigger>
-                </TabsList>
-                <TabsContent value="library">
-                  <ScrollArea className="h-[320px] rounded-3xl border border-input bg-background p-3">
-                    <div className="space-y-3">
-                      {expressions.map((expr) => (
+        {practiceError ? (
+          <div className="rounded-3xl border border-destructive bg-destructive/10 p-4 text-sm text-destructive-foreground">
+            {practiceError}
+          </div>
+        ) : null}
+
+        {screen === 'expressions' && (
+          <>
+            <Card>
+              <CardHeader className="items-center justify-between gap-4">
+                <div>
+                  <CardTitle>Add a new expression</CardTitle>
+                  <CardDescription>Save English expressions and select the ones you want to practice.</CardDescription>
+                </div>
+                <Sparkles className="h-5 w-5 text-primary" />
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+                  <Input
+                    value={newExpr}
+                    onChange={(event) => setNewExpr(event.target.value)}
+                    onKeyPress={(event) => event.key === 'Enter' && addExpression()}
+                    placeholder="e.g., grapple with"
+                  />
+                  <Button onClick={addExpression} disabled={!newExpr.trim()}>
+                    Add expression
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="items-center justify-between gap-4">
+                <div>
+                  <CardTitle>Saved expressions</CardTitle>
+                  <CardDescription>Choose the expressions you'd like to include in the next drill.</CardDescription>
+                </div>
+                <Badge variant="secondary">{expressions.length} total</Badge>
+              </CardHeader>
+              <CardContent>
+                <ScrollArea className="h-[340px] rounded-3xl border border-input bg-background p-3">
+                  <div className="space-y-3">
+                    {expressions.length > 0 ? (
+                      expressions.map((expr) => (
                         <button
                           key={expr.id}
                           type="button"
@@ -233,200 +272,192 @@ export default function ExpressionMiningApp() {
                             </div>
                           </div>
                         </button>
-                      ))}
-                      {expressions.length === 0 && (
-                        <div className="rounded-3xl border border-dashed border-input bg-muted p-6 text-center text-sm text-muted-foreground">
-                          Your expression library is empty. Add a phrase to get started.
-                        </div>
-                      )}
-                    </div>
-                  </ScrollArea>
-                </TabsContent>
-                <TabsContent value="insights">
-                  <div className="space-y-4">
-                    <div className="rounded-3xl border border-input bg-muted p-5">
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="text-sm font-medium text-muted-foreground">Practice readiness</p>
-                        <Badge variant="outline">{selectedCount} selected</Badge>
+                      ))
+                    ) : (
+                      <div className="rounded-3xl border border-dashed border-input bg-muted p-6 text-center text-sm text-muted-foreground">
+                        Your expression library is empty. Add a phrase to get started.
                       </div>
-                      <div className="mt-4">
-                        <Progress value={readinessPercent} />
-                      </div>
-                    </div>
-                    <div className="rounded-3xl border border-input bg-muted p-5">
-                      <p className="text-sm font-medium text-muted-foreground">Active streak</p>
-                      <p className="mt-3 text-3xl font-semibold text-foreground">{history.length} sessions</p>
-                      <p className="mt-2 text-sm text-muted-foreground">Review your recent progress in the history tab.</p>
-                    </div>
+                    )}
                   </div>
-                </TabsContent>
-              </Tabs>
-            </CardContent>
-          </Card>
+                </ScrollArea>
+              </CardContent>
+            </Card>
 
-          {practiceError ? (
-            <div className="rounded-3xl border border-destructive bg-destructive/10 p-4 text-sm text-destructive-foreground">
-              {practiceError}
+            <div className="grid gap-4 sm:grid-cols-3">
+              <Card>
+                <CardContent className="space-y-2">
+                  <p className="text-sm font-medium text-muted-foreground">Selected</p>
+                  <p className="text-3xl font-semibold text-foreground">{selectedCount}</p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="space-y-2">
+                  <p className="text-sm font-medium text-muted-foreground">Total uses</p>
+                  <p className="text-3xl font-semibold text-foreground">{totalUses}</p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="space-y-2">
+                  <p className="text-sm font-medium text-muted-foreground">Practice mode</p>
+                  <p className="text-3xl font-semibold text-foreground">{selectedCount > 0 ? 'Selected' : 'All saved'}</p>
+                </CardContent>
+              </Card>
             </div>
-          ) : null}
-        </div>
 
-        <footer className="fixed bottom-0 left-0 right-0 z-10 border-t border-input/80 bg-background/95 px-4 py-4 backdrop-blur-xl">
-          <div className="mx-auto flex max-w-xl gap-3">
-            <Button variant="secondary" onClick={() => setScreen('history')}>History</Button>
-            <Button onClick={startPractice} disabled={selectedCount === 0 || isLoading}>
-              {isLoading ? 'Starting...' : `Practice (${selectedCount})`}
-            </Button>
-          </div>
-        </footer>
-      </div>
-    );
-  }
-
-  if (screen === 'practice' && scenario) {
-    return (
-      <div className="min-h-screen px-4 py-5 sm:px-6">
-        <div className="mx-auto flex max-w-xl flex-col gap-5 pb-28">
-          <Card>
-            <CardHeader className="items-center justify-between gap-4 sm:flex-row">
-              <div>
-                <CardTitle>Practice conversation</CardTitle>
-                <CardDescription>Reply naturally and earn usage credit for the phrases you select.</CardDescription>
-              </div>
-              <Button variant="ghost" size="sm" onClick={exitPractice}>
-                <ArrowLeft className="mr-2 h-4 w-4" /> Home
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <Button onClick={startPractice} disabled={isLoading || !expressions.length} className="w-full sm:w-auto">
+                {isLoading ? 'Preparing practice…' : 'Start practice'}
               </Button>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="rounded-3xl border border-input bg-muted p-5">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-sm font-medium text-muted-foreground">Scenario</p>
-                  <Badge variant="secondary">{scenario.difficulty}</Badge>
-                </div>
-                <p className="mt-4 text-base leading-7 text-foreground">{scenario.scenario}</p>
-              </div>
+              <Button variant="secondary" onClick={() => setScreen('history')} className="w-full sm:w-auto">
+                View history
+              </Button>
+            </div>
+          </>
+        )}
 
-              <div className="rounded-3xl border border-input bg-background p-5">
-                <p className="text-sm font-medium text-muted-foreground">Target expressions</p>
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {scenario.targetExpressions.map((expr) => (
-                    <Badge key={expr} variant="outline">
-                      {expr}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
-
-              <div className="rounded-3xl border border-input bg-muted p-5">
-                <p className="text-sm font-medium text-muted-foreground">Their opening message</p>
-                <div className="mt-3 rounded-3xl bg-background p-4 text-foreground">“{scenario.opening}”</div>
-              </div>
-
-              <div className="space-y-3">
-                <label className="block text-sm font-semibold text-foreground">Your reply</label>
-                <Textarea
-                  value={userReply}
-                  onChange={(event) => setUserReply(event.target.value)}
-                  placeholder="Write a fluent, natural reply using the target phrases."
-                />
-              </div>
-
-              {practiceError ? (
-                <div className="rounded-3xl border border-destructive bg-destructive/10 p-4 text-sm text-destructive-foreground">
-                  {practiceError}
-                </div>
-              ) : null}
-
-              {hasResults ? (
+        {screen === 'practice' && (
+          <>
+            {exercise ? (
+              <>
                 <Card>
-                  <CardHeader className="items-center justify-between gap-4">
+                  <CardHeader className="items-start justify-between gap-4 sm:flex-row">
                     <div>
-                      <CardTitle>{successCount === totalCount ? 'Perfect reply' : 'Evaluation results'}</CardTitle>
-                      <CardDescription>{successCount}/{totalCount} expressions used naturally</CardDescription>
+                      <CardTitle>Translation drill</CardTitle>
+                      <CardDescription>Translate the Japanese prompt into English using the target expressions.</CardDescription>
                     </div>
-                    <Badge variant={successCount === totalCount ? 'secondary' : 'outline'}>
-                      {successCount === totalCount ? 'Success' : 'Partial'}
-                    </Badge>
+                    <div className="flex flex-wrap gap-2">
+                      <Badge variant="secondary">{exercise.difficulty}</Badge>
+                      <Badge variant="outline">{exercise.targetExpressions.length} target{exercise.targetExpressions.length === 1 ? '' : 's'}</Badge>
+                    </div>
                   </CardHeader>
-                  <CardContent className="space-y-3">
-                    {Object.entries(lastResult).map(([expr, ok]) => (
-                      <div
-                        key={expr}
-                        className={`flex items-center justify-between gap-3 rounded-3xl border p-4 ${ok ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-100' : 'border-destructive/20 bg-destructive/10 text-destructive-foreground'}`}
-                      >
-                        <div>
-                          <p className="font-semibold">{expr}</p>
-                          <p className="text-sm text-muted-foreground">{ok ? 'Used naturally' : 'Not used naturally'}</p>
-                        </div>
-                        <span className={`inline-flex h-10 w-10 items-center justify-center rounded-full ${ok ? 'bg-emerald-500/20 text-emerald-300' : 'bg-destructive/20 text-destructive-foreground'}`}>
-                          <CheckCircle2 className="h-5 w-5" />
-                        </span>
+                  <CardContent className="space-y-4">
+                    <div className="rounded-3xl border border-input bg-muted p-4">
+                      <p className="text-sm font-medium text-muted-foreground">Japanese prompt</p>
+                      <p className="mt-3 text-base leading-7 text-foreground">{exercise.japanesePrompt}</p>
+                    </div>
+                    {exercise.context ? (
+                      <div className="rounded-3xl border border-input bg-background p-4">
+                        <p className="text-sm font-medium text-muted-foreground">Context</p>
+                        <p className="mt-3 text-foreground">{exercise.context}</p>
                       </div>
-                    ))}
+                    ) : null}
+                    <div className="flex flex-wrap gap-2">
+                      {exercise.targetExpressions.map((expr) => (
+                        <Badge key={expr} variant="outline">
+                          {expr}
+                        </Badge>
+                      ))}
+                    </div>
                   </CardContent>
                 </Card>
-              ) : null}
-            </CardContent>
-          </Card>
-        </div>
 
-        <footer className="fixed bottom-0 left-0 right-0 z-10 border-t border-input/80 bg-background/95 px-4 py-4 backdrop-blur-xl">
-          <div className="mx-auto flex max-w-xl gap-3">
-            <Button variant="secondary" onClick={exitPractice}>Back</Button>
-            <Button onClick={evaluateReply} disabled={isLoading || !userReply.trim()}>
-              {isLoading ? 'Checking...' : 'Submit reply'}
-            </Button>
-          </div>
-        </footer>
-      </div>
-    );
-  }
+                <Card>
+                  <CardHeader className="items-center justify-between gap-4">
+                    <CardTitle>Your answer</CardTitle>
+                    <Button variant="ghost" size="sm" onClick={() => goToScreen('expressions')}>
+                      <ArrowLeft className="mr-2 h-4 w-4" /> Back to expressions
+                    </Button>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <Textarea
+                      value={answer}
+                      onChange={(event) => setAnswer(event.target.value)}
+                      placeholder="Write your English translation here."
+                    />
+                    <div className="flex flex-col gap-3 sm:flex-row sm:justify-between">
+                      <Button onClick={submitAnswer} disabled={isLoading || !answer.trim()}>
+                        {isLoading ? 'Checking answer…' : 'Submit answer'}
+                      </Button>
+                      <Button variant="secondary" onClick={() => goToScreen('history')}>
+                        See your history
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
 
-  if (screen === 'history') {
-    const groupedByExpr: Record<string, number> = {};
-    for (const item of history) {
-      groupedByExpr[item.expression] = (groupedByExpr[item.expression] || 0) + 1;
-    }
-    const topExpressions = Object.entries(groupedByExpr)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5);
-    const sortedHistory = [...history].sort((a, b) => (a.usedAt < b.usedAt ? 1 : -1));
+                {evaluationFeedback ? (
+                  <Card>
+                    <CardHeader className="items-center justify-between gap-4">
+                      <CardTitle>Evaluation</CardTitle>
+                      <Badge variant={Object.values(evaluationResults).every(Boolean) ? 'secondary' : 'outline'}>
+                        {Object.values(evaluationResults).every(Boolean) ? 'Passed' : 'Review'}
+                      </Badge>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      <p className="text-sm text-muted-foreground">{evaluationFeedback}</p>
+                      <div className="space-y-3">
+                        {Object.entries(evaluationResults).map(([expr, ok]) => (
+                          <div key={expr} className={`flex items-center justify-between gap-3 rounded-3xl border p-4 ${ok ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-100' : 'border-destructive/20 bg-destructive/10 text-destructive-foreground'}`}>
+                            <div>
+                              <p className="font-semibold">{expr}</p>
+                              <p className="text-sm text-muted-foreground">{ok ? 'Used naturally' : 'Not used naturally'}</p>
+                            </div>
+                            <CheckCircle2 className={`h-6 w-6 ${ok ? 'text-emerald-300' : 'text-destructive-foreground'}`} />
+                          </div>
+                        ))}
+                      </div>
+                      {correctedAnswer ? (
+                        <div className="rounded-3xl border border-input bg-background p-4">
+                          <p className="text-sm font-medium text-muted-foreground">Model answer</p>
+                          <p className="mt-3 text-foreground">{correctedAnswer}</p>
+                        </div>
+                      ) : null}
+                    </CardContent>
+                  </Card>
+                ) : null}
+              </>
+            ) : (
+              <Card>
+                <CardContent>
+                  <p className="text-sm text-muted-foreground">No exercise is loaded yet.</p>
+                  <div className="mt-4 flex gap-3">
+                    <Button onClick={startPractice} disabled={isLoading || !expressions.length}>
+                      {isLoading ? 'Preparing…' : 'Load practice exercise'}
+                    </Button>
+                    <Button variant="secondary" onClick={() => goToScreen('expressions')}>
+                      Choose expressions
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </>
+        )}
 
-    return (
-      <div className="min-h-screen px-4 py-5 sm:px-6">
-        <div className="mx-auto flex max-w-xl flex-col gap-5 pb-28">
-          <Card>
-            <CardHeader className="items-center justify-between gap-4 sm:flex-row">
-              <div>
-                <CardTitle>Usage history</CardTitle>
-                <CardDescription>Review every phrase you’ve practiced and tracked.</CardDescription>
-              </div>
-              <Button variant="ghost" size="sm" onClick={() => setScreen('home')}>
-                <ArrowLeft className="mr-2 h-4 w-4" /> Home
-              </Button>
-            </CardHeader>
-            <CardContent>
-              <div className="grid gap-4 sm:grid-cols-2">
+        {screen === 'history' && (
+          <>
+            <Card>
+              <CardHeader className="items-center justify-between gap-4 sm:flex-row">
+                <div>
+                  <CardTitle>Practice history</CardTitle>
+                  <CardDescription>Track successful uses and the expressions you use most.</CardDescription>
+                </div>
+                <Button variant="ghost" size="sm" onClick={() => goToScreen('expressions')}>
+                  <ArrowLeft className="mr-2 h-4 w-4" /> Expressions
+                </Button>
+              </CardHeader>
+              <CardContent className="grid gap-4 sm:grid-cols-2">
                 <div className="rounded-3xl border border-input bg-muted p-5">
-                  <p className="text-sm font-medium text-muted-foreground">Top expressions</p>
+                  <p className="text-sm font-medium text-muted-foreground">Most used expressions</p>
                   <div className="mt-4 space-y-3">
                     {topExpressions.length > 0 ? (
-                      topExpressions.map(([expression, count], index) => (
-                        <div key={expression} className="flex items-center justify-between rounded-3xl border border-input bg-background p-4">
+                      topExpressions.map((expr, index) => (
+                        <div key={expr.id} className="flex items-center justify-between rounded-3xl border border-input bg-background p-4">
                           <div>
-                            <p className="font-semibold text-foreground">{expression}</p>
-                            <p className="text-sm text-muted-foreground">Used {count} time{count === 1 ? '' : 's'}</p>
+                            <p className="font-semibold text-foreground">{expr.text}</p>
+                            <p className="text-sm text-muted-foreground">Used {expr.count || 0} time{expr.count === 1 ? '' : 's'}</p>
                           </div>
                           <Badge variant="secondary">#{index + 1}</Badge>
                         </div>
                       ))
                     ) : (
-                      <p className="text-sm text-muted-foreground">No practice history yet.</p>
+                      <p className="text-sm text-muted-foreground">No expressions have been used yet.</p>
                     )}
                   </div>
                 </div>
+
                 <div className="rounded-3xl border border-input bg-muted p-5">
-                  <p className="text-sm font-medium text-muted-foreground">Recent activity</p>
+                  <p className="text-sm font-medium text-muted-foreground">Recent successful uses</p>
                   <ScrollArea className="mt-4 h-[260px] rounded-3xl border border-input bg-background p-3">
                     <div className="space-y-3">
                       {sortedHistory.length > 0 ? (
@@ -438,19 +469,17 @@ export default function ExpressionMiningApp() {
                         ))
                       ) : (
                         <div className="rounded-3xl border border-dashed border-input/60 bg-background p-6 text-center text-sm text-muted-foreground">
-                          No history yet. Practice to populate your timeline.
+                          No successful practice results yet.
                         </div>
                       )}
                     </div>
                   </ScrollArea>
                 </div>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
+              </CardContent>
+            </Card>
+          </>
+        )}
       </div>
-    );
-  }
-
-  return null;
+    </div>
+  );
 }
