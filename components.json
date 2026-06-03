@@ -1,0 +1,21 @@
+{
+  "config": {
+    "base": "dark",
+    "css": "default",
+    "dir": "src",
+    "theme": "slate"
+  },
+  "components": [
+    "button",
+    "card",
+    "badge",
+    "input",
+    "textarea",
+    "tabs",
+    "separator",
+    "scroll-area",
+    "progress",
+    "alert",
+    "dialog"
+  ]
+}
